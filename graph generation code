@@ -1,0 +1,165 @@
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import transforms, datasets
+from torch.utils.data import DataLoader
+import torch
+import torch.nn.functional as F
+from facenet_pytorch import InceptionResnetV1
+import torch.optim as optim
+from torchvision.transforms import v2
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import numpy as np
+
+print("Starting the training")
+
+transform = v2.Compose([
+    v2.Resize((256, 256)),
+    v2.ToTensor(),
+    v2.Grayscale(1),
+    v2.Normalize(mean=[0.5], std=[0.5])
+])
+
+DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {DEVICE}")
+
+def plot_graphs(train_losses, val_accuracies):
+    epochs = range(1, len(train_losses) + 1)
+
+    # Plot Loss vs. Epoch
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, train_losses, label='Training Loss')
+    plt.title('Training Loss vs. Epoch')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('loss_vs_epoch.png')
+    plt.show()
+
+    # Plot Validation Accuracy vs. Epoch
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, val_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy vs. Epoch')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('accuracy_vs_epoch.png')
+    plt.show()
+
+def plot_confusion_matrix(model, val_loader):
+    y_true = []
+    y_pred = []
+
+    model.eval()
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(DEVICE), labels.to(DEVICE).float().unsqueeze(1)
+            outputs = model(images)
+            preds = (torch.sigmoid(outputs) > 0.5).cpu().numpy()
+            y_true.extend(labels.cpu().numpy())
+            y_pred.extend(preds)
+
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Real', 'Fake'])
+    disp.plot(cmap='Blues')
+    plt.title('Confusion Matrix')
+    plt.savefig('confusion_matrix.png')
+    plt.show()
+
+def main():
+    writer = SummaryWriter(log_dir="logs")
+
+    # Load datasets
+    train_dataset = datasets.ImageFolder(
+        root=r"C:\Users\iqbal\Downloads\real_vs_fake\real-vs-fake\train",
+        transform=transform
+    )
+    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=4)
+
+    val_dataset = datasets.ImageFolder(
+        root=r"C:\Users\iqbal\Downloads\real_vs_fake\real-vs-fake\valid",
+        transform=transform
+    )
+    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, num_workers=4)
+
+    print(f"Number of training samples: {len(train_dataset)}")
+    print(f"Number of validation samples: {len(val_dataset)}")
+
+    # Load and modify the model
+    model = InceptionResnetV1(
+        pretrained="vggface2",
+        classify=True,
+        num_classes=2
+    ).to(DEVICE)
+
+    for param in model.parameters():
+        param.requires_grad = False  # Freeze all layers
+
+    model.logits = torch.nn.Linear(model.logits.in_features, 1)
+    model.logits.requires_grad = True  # Train only the final layer
+
+    # Loss and optimizer
+    criterion = torch.nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+
+    # Lists to store metrics for plotting
+    train_losses = []
+    val_accuracies = []
+
+    # Training loop
+    for epoch in range(10):
+        print(f"Epoch {epoch+1}/10")
+        model.train()
+        running_loss = 0.0
+
+        for batch_num, (images, labels) in enumerate(train_loader, start=1):
+            print(f"Processing batch {batch_num}/{len(train_loader)}")
+            images, labels = images.to(DEVICE), labels.to(DEVICE).float().unsqueeze(1)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * images.size(0)
+
+        epoch_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(epoch_loss)
+        writer.add_scalar('Loss/Train', epoch_loss, epoch)
+        print(f"Training Loss: {epoch_loss:.4f}")
+
+        # Validation loop
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(DEVICE), labels.to(DEVICE).float().unsqueeze(1)
+                outputs = model(images)
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+
+        val_accuracy = correct / total
+        val_accuracies.append(val_accuracy)
+        writer.add_scalar('Accuracy/Validation', val_accuracy, epoch)
+        print(f"Validation Accuracy: {val_accuracy:.4f}")
+
+    writer.close()
+
+    # Plot training and validation graphs
+    plot_graphs(train_losses, val_accuracies)
+
+    # Plot confusion matrix
+    plot_confusion_matrix(model, val_loader)
+
+    # Save the fine-tuned model
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, 'trainedmodel++.pth')
+
+if __name__ == '__main__':
+    main()
